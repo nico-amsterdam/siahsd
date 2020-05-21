@@ -24,6 +24,7 @@
 #include "database.h"
 #include "jsonbot.h"
 #include "spacestate.h"
+#include "hook_script.h"
 
 /* My global state */
 configuration *conf = NULL;
@@ -165,6 +166,8 @@ STATUS read_configuration_file(TALLOC_CTX *mem_ctx)
 				jsonbot_init();
 			} else if (strcmp(ptr, "spacestate") == 0) {
 				spacestate_init();
+			} else if (strcmp(ptr, "script") == 0) {
+				script_init();
 			}
 		} while((ptr = strtok(NULL, " ")) != NULL);
 	}

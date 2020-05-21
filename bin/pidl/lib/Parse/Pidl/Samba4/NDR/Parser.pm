@@ -261,7 +261,7 @@ sub check_fully_dereferenced($$)
 				$nump = $_->{POINTER_INDEX}+1;
 			}
 		}
-		warning($element->{ORIGINAL}, "Got pointer for `$e->{NAME}', expected fully dereferenced variable") if ($nump > length($ptr));
+		warning($element->{ORIGINAL}, "Got pointer for `$e->{NAME}', expected fully derefenced variable") if ($nump > length($ptr));
 		return ($origvar);
 	}
 }	
@@ -321,102 +321,25 @@ sub check_null_pointer($$$$)
 	}
 }
 
-sub is_deferred_switch_non_empty($)
-{
-	# 1 if there needs to be a deferred branch in an ndr_pull/push,
-	# 0 otherwise.
-	my ($e) = @_;
-	my $have_default = 0;
-	foreach my $el (@{$e->{ELEMENTS}}) {
-		if ($el->{CASE} eq "default") {
-			$have_default = 1;
-		}
-		if ($el->{TYPE} ne "EMPTY") {
-			if (ContainsDeferred($el, $el->{LEVELS}[0])) {
-				return 1;
-			}
-		}
-	}
-	return ! $have_default;
-}
-
-sub ParseArrayPullGetSize($$$$$$)
-{
-	my ($self,$e,$l,$ndr,$var_name,$env) = @_;
-
-	my $size;
-
-	if ($l->{IS_CONFORMANT}) {
-		$size = "ndr_get_array_size($ndr, " . get_pointer_to($var_name) . ")";
-	} elsif ($l->{IS_ZERO_TERMINATED} and $l->{SIZE_IS} == 0 and $l->{LENGTH_IS} == 0) { # Noheader arrays
-		$size = "ndr_get_string_size($ndr, sizeof(*$var_name))";
-	} else {
-		$size = ParseExprExt($l->{SIZE_IS}, $env, $e->{ORIGINAL},
-			check_null_pointer($e, $env, sub { $self->pidl(shift); },
-					   "return ndr_pull_error($ndr, NDR_ERR_INVALID_POINTER, \"NULL Pointer for size_is()\");"),
-			check_fully_dereferenced($e, $env));
-	}
-
-	$self->pidl("size_$e->{NAME}_$l->{LEVEL_INDEX} = $size;");
-	my $array_size = "size_$e->{NAME}_$l->{LEVEL_INDEX}";
-
-	if (my $range = has_property($e, "range")) {
-		my ($low, $high) = split(/,/, $range, 2);
-		if ($low < 0) {
-			warning(0, "$low is invalid for the range of an array size");
-		}
-		if ($low == 0) {
-			$self->pidl("if ($array_size > $high) {");
-		} else {
-			$self->pidl("if ($array_size < $low || $array_size > $high) {");
-		}
-		$self->pidl("\treturn ndr_pull_error($ndr, NDR_ERR_RANGE, \"value out of range\");");
-		$self->pidl("}");
-	}
-
-	return $array_size;
-}
-
-#####################################################################
-# parse an array - pull side
-sub ParseArrayPullGetLength($$$$$$;$)
-{
-	my ($self,$e,$l,$ndr,$var_name,$env,$array_size) = @_;
-
-	if (not defined($array_size)) {
-		$array_size = $self->ParseArrayPullGetSize($e, $l, $ndr, $var_name, $env);
-	}
-
-	if (not $l->{IS_VARYING}) {
-		return $array_size;
-	}
-
-	my $length = "ndr_get_array_length($ndr, " . get_pointer_to($var_name) .")";
-	$self->pidl("length_$e->{NAME}_$l->{LEVEL_INDEX} = $length;");
-	my $array_length = "length_$e->{NAME}_$l->{LEVEL_INDEX}";
-
-	if (my $range = has_property($e, "range")) {
-		my ($low, $high) = split(/,/, $range, 2);
-		if ($low < 0) {
-			warning(0, "$low is invalid for the range of an array size");
-		}
-		if ($low == 0) {
-			$self->pidl("if ($array_length > $high) {");
-		} else {
-			$self->pidl("if ($array_length < $low || $array_length > $high) {");
-		}
-		$self->pidl("\treturn ndr_pull_error($ndr, NDR_ERR_RANGE, \"value out of range\");");
-		$self->pidl("}");
-	}
-
-	return $array_length;
-}
-
 #####################################################################
 # parse an array - pull side
 sub ParseArrayPullHeader($$$$$$)
 {
 	my ($self,$e,$l,$ndr,$var_name,$env) = @_;
+
+	my $length;
+	my $size;
+
+	if ($l->{IS_CONFORMANT}) {
+		$length = $size = "ndr_get_array_size($ndr, " . get_pointer_to($var_name) . ")";
+	} elsif ($l->{IS_ZERO_TERMINATED} and $l->{SIZE_IS} == 0 and $l->{LENGTH_IS} == 0) { # Noheader arrays
+		$length = $size = "ndr_get_string_size($ndr, sizeof(*$var_name))";
+	} else {
+		$length = $size = ParseExprExt($l->{SIZE_IS}, $env, $e->{ORIGINAL},
+			check_null_pointer($e, $env, sub { $self->pidl(shift); },
+					   "return ndr_pull_error($ndr, NDR_ERR_INVALID_POINTER, \"NULL Pointer for size_is()\");"),
+			check_fully_dereferenced($e, $env));
+	}
 
 	if ((!$l->{IS_SURROUNDING}) and $l->{IS_CONFORMANT}) {
 		$self->pidl("NDR_CHECK(ndr_pull_array_size($ndr, " . get_pointer_to($var_name) . "));");
@@ -424,15 +347,13 @@ sub ParseArrayPullHeader($$$$$$)
 
 	if ($l->{IS_VARYING}) {
 		$self->pidl("NDR_CHECK(ndr_pull_array_length($ndr, " . get_pointer_to($var_name) . "));");
+		$length = "ndr_get_array_length($ndr, " . get_pointer_to($var_name) .")";
 	}
 
-	my $array_size = $self->ParseArrayPullGetSize($e, $l, $ndr, $var_name, $env);
-	my $array_length = $self->ParseArrayPullGetLength($e, $l, $ndr, $var_name, $env, $array_size);
-
-	if ($array_length ne $array_size) {
-		$self->pidl("if ($array_length > $array_size) {");
+	if ($length ne $size) {
+		$self->pidl("if ($length > $size) {");
 		$self->indent;
-		$self->pidl("return ndr_pull_error($ndr, NDR_ERR_ARRAY_SIZE, \"Bad array size %u should exceed array length %u\", $array_size, $array_length);");
+		$self->pidl("return ndr_pull_error($ndr, NDR_ERR_ARRAY_SIZE, \"Bad array size %u should exceed array length %u\", $size, $length);");
 		$self->deindent;
 		$self->pidl("}");
 	}
@@ -462,10 +383,10 @@ sub ParseArrayPullHeader($$$$$$)
 	}
 
 	if (ArrayDynamicallyAllocated($e,$l) and not is_charset_array($e,$l)) {
-		$self->AllocateArrayLevel($e,$l,$ndr,$var_name,$array_size);
+		$self->AllocateArrayLevel($e,$l,$ndr,$var_name,$size);
 	}
 
-	return $array_length;
+	return $length;
 }
 
 sub compression_alg($$)
@@ -689,7 +610,7 @@ sub ParseElementPushLevel
 		$var_name = get_array_element($var_name, $counter);
 
 		if ((($primitives and not $l->{IS_DEFERRED}) or ($deferred and $l->{IS_DEFERRED})) and not $array_pointless) {
-			$self->pidl("for ($counter = 0; $counter < ($length); $counter++) {");
+			$self->pidl("for ($counter = 0; $counter < $length; $counter++) {");
 			$self->indent;
 			$self->ParseElementPushLevel($e, GetNextLevel($e, $l), $ndr, $var_name, $env, 1, 0);
 			$self->deindent;
@@ -697,12 +618,12 @@ sub ParseElementPushLevel
 		}
 
 		if ($deferred and ContainsDeferred($e, $l) and not $array_pointless) {
-			$self->pidl("for ($counter = 0; $counter < ($length); $counter++) {");
+			$self->pidl("for ($counter = 0; $counter < $length; $counter++) {");
 			$self->indent;
 			$self->ParseElementPushLevel($e, GetNextLevel($e, $l), $ndr, $var_name, $env, 0, 1);
 			$self->deindent;
 			$self->pidl("}");
-		}
+		}	
 	} elsif ($l->{TYPE} eq "SWITCH") {
 		$self->ParseElementPushLevel($e, GetNextLevel($e, $l), $ndr, $var_name, $env, $primitives, $deferred);
 	}
@@ -756,15 +677,13 @@ sub ParsePtrPush($$$$$)
 	my ($self,$e,$l,$ndr,$var_name) = @_;
 
 	if ($l->{POINTER_TYPE} eq "ref") {
-		if ($l->{LEVEL_INDEX} > 0) {
-			$self->pidl("if ($var_name == NULL) {");
-			$self->indent;
-			$self->pidl("return ndr_push_error($ndr, NDR_ERR_INVALID_POINTER, \"NULL [ref] pointer\");");
-			$self->deindent;
-			$self->pidl("}");
-		}
+		$self->pidl("if ($var_name == NULL) {");
+		$self->indent;
+		$self->pidl("return ndr_push_error($ndr, NDR_ERR_INVALID_POINTER, \"NULL [ref] pointer\");");
+		$self->deindent;
+		$self->pidl("}");
 		if ($l->{LEVEL} eq "EMBEDDED") {
-			$self->pidl("NDR_CHECK(ndr_push_ref_ptr(ndr)); /* $var_name */");
+			$self->pidl("NDR_CHECK(ndr_push_ref_ptr(ndr));");
 		}
 	} elsif ($l->{POINTER_TYPE} eq "relative") {
 		$self->pidl("NDR_CHECK(ndr_push_relative_ptr1($ndr, $var_name));");
@@ -896,7 +815,7 @@ sub ParseElementPrint($$$$$)
 
 				$self->pidl("$ndr->print($ndr, \"\%s: ARRAY(\%d)\", \"$e->{NAME}\", (int)$length);");
 				$self->pidl("$ndr->depth++;");
-				$self->pidl("for ($counter = 0; $counter < ($length); $counter++) {");
+				$self->pidl("for ($counter=0;$counter<$length;$counter++) {");
 				$self->indent;
 
 				$var_name = get_array_element($var_name, $counter);
@@ -979,11 +898,7 @@ sub ParseDataPull($$$$$$$)
 
 		$var_name = get_pointer_to($var_name);
 
-		if (has_property($e, "skip")) {
-			$self->pidl("/* [skip] '$var_name' */");
-		} else {
-			$self->pidl("NDR_CHECK(".TypeFunctionName("ndr_pull", $l->{DATA_TYPE})."($ndr, $ndr_flags, $var_name));");
-		}
+		$self->pidl("NDR_CHECK(".TypeFunctionName("ndr_pull", $l->{DATA_TYPE})."($ndr, $ndr_flags, $var_name));");
 
 		my $pl = GetPrevLevel($e, $l);
 
@@ -1021,11 +936,7 @@ sub ParseDataPush($$$$$$$)
 			$var_name = get_pointer_to($var_name);
 		}
 
-		if (has_property($e, "skip")) {
-			$self->pidl("/* [skip] '$var_name' */");
-		} else {
-			$self->pidl("NDR_CHECK(".TypeFunctionName("ndr_push", $l->{DATA_TYPE})."($ndr, $ndr_flags, $var_name));");
-		}
+		$self->pidl("NDR_CHECK(".TypeFunctionName("ndr_push", $l->{DATA_TYPE})."($ndr, $ndr_flags, $var_name));");
 	} else {
 		$self->ParseTypePush($l->{DATA_TYPE}, $ndr, $var_name, $primitives, $deferred);
 	}
@@ -1123,7 +1034,6 @@ sub ParseElementPullLevel
 	my($self,$e,$l,$ndr,$var_name,$env,$primitives,$deferred) = @_;
 
 	my $ndr_flags = CalcNdrFlags($l, $primitives, $deferred);
-	my $array_length = undef;
 
 	if ($l->{TYPE} eq "ARRAY" and ($l->{IS_VARYING} or $l->{IS_CONFORMANT})) {
 		$var_name = get_pointer_to($var_name);
@@ -1137,7 +1047,20 @@ sub ParseElementPullLevel
 			$self->ParseSubcontextPullEnd($e, $l, $ndr, $env);
 		} elsif ($l->{TYPE} eq "ARRAY") {
 			my $length = $self->ParseArrayPullHeader($e, $l, $ndr, $var_name, $env);
-			$array_length = $length;
+
+			if (my $range = has_property($e, "range")) {
+				my ($low, $high) = split(/,/, $range, 2);
+				if ($low < 0) {
+					warning(0, "$low is invalid for the range of an array size");
+				}
+				if ($low == 0) {
+					$self->pidl("if ($length > $high) {");
+				} else {
+					$self->pidl("if ($length < $low || $length > $high) {");
+				}
+				$self->pidl("\treturn ndr_pull_error($ndr, NDR_ERR_RANGE, \"value out of range\");");
+				$self->pidl("}");
+			}
 
 			my $nl = GetNextLevel($e, $l);
 
@@ -1192,7 +1115,7 @@ sub ParseElementPullLevel
 		$self->ParseMemCtxPullEnd($e, $l, $ndr);
 
 		if ($l->{POINTER_TYPE} ne "ref") {
-			if ($l->{POINTER_TYPE} eq "relative" or $l->{POINTER_TYPE} eq "relative_short") {
+			if ($l->{POINTER_TYPE} eq "relative") {
 				$self->pidl("if ($ndr->offset > $ndr->relative_highest_offset) {");
 				$self->indent;
 				$self->pidl("$ndr->relative_highest_offset = $ndr->offset;");
@@ -1205,12 +1128,26 @@ sub ParseElementPullLevel
 		}
 	} elsif ($l->{TYPE} eq "ARRAY" and 
 			not has_fast_array($e,$l) and not is_charset_array($e, $l)) {
-		my $length = $array_length;
+		my $length = ParseExpr($l->{LENGTH_IS}, $env, $e->{ORIGINAL});
 		my $counter = "cntr_$e->{NAME}_$l->{LEVEL_INDEX}";
 		my $array_name = $var_name;
 
-		if (not defined($length)) {
-			$length = $self->ParseArrayPullGetLength($e, $l, $ndr, $var_name, $env);
+		if ($l->{IS_VARYING}) {
+			$length = "ndr_get_array_length($ndr, " . get_pointer_to($var_name) .")";
+		}
+
+		if (my $range = has_property($e, "range")) {
+			my ($low, $high) = split(/,/, $range, 2);
+			if ($low < 0) {
+				warning(0, "$low is invalid for the range of an array size");
+			}
+			if ($low == 0) {
+				$self->pidl("if ($length > $high) {");
+			} else {
+				$self->pidl("if ($length < $low || $length > $high) {");
+			}
+			$self->pidl("\treturn ndr_pull_error($ndr, NDR_ERR_RANGE, \"value out of range\");");
+			$self->pidl("}");
 		}
 
 		$var_name = get_array_element($var_name, $counter);
@@ -1224,7 +1161,7 @@ sub ParseElementPullLevel
 				$self->CheckStringTerminator($ndr,$e,$l,$length);
 			}
 
-			$self->pidl("for ($counter = 0; $counter < ($length); $counter++) {");
+			$self->pidl("for ($counter = 0; $counter < $length; $counter++) {");
 			$self->indent;
 			$self->ParseElementPullLevel($e, $nl, $ndr, $var_name, $env, 1, 0);
 			$self->deindent;
@@ -1232,7 +1169,7 @@ sub ParseElementPullLevel
 		}
 
 		if ($deferred and ContainsDeferred($e, $l)) {
-			$self->pidl("for ($counter = 0; $counter < ($length); $counter++) {");
+			$self->pidl("for ($counter = 0; $counter < $length; $counter++) {");
 			$self->indent;
 			$self->ParseElementPullLevel($e,GetNextLevel($e,$l), $ndr, $var_name, $env, 0, 1);
 			$self->deindent;
@@ -1352,29 +1289,9 @@ sub ParsePtrPull($$$$$)
 	$self->pidl("}");
 }
 
-sub CheckRefPtrs($$$$)
-{
-	my ($self,$e,$ndr,$env) = @_;
-
-	return if ContainsPipe($e, $e->{LEVELS}[0]);
-	return if ($e->{LEVELS}[0]->{TYPE} ne "POINTER");
-	return if ($e->{LEVELS}[0]->{POINTER_TYPE} ne "ref");
-
-	my $var_name = $env->{$e->{NAME}};
-	$var_name = append_prefix($e, $var_name);
-
-	$self->pidl("if ($var_name == NULL) {");
-	$self->indent;
-	$self->pidl("return ndr_push_error($ndr, NDR_ERR_INVALID_POINTER, \"NULL [ref] pointer\");");
-	$self->deindent;
-	$self->pidl("}");
-}
-
 sub ParseStructPushPrimitives($$$$$)
 {
 	my ($self, $struct, $ndr, $varname, $env) = @_;
-
-	$self->CheckRefPtrs($_, $ndr, $env) foreach (@{$struct->{ELEMENTS}});
 
 	# see if the structure contains a conformant array. If it
 	# does, then it must be the last element of the structure, and
@@ -1661,21 +1578,16 @@ sub DeclarePtrVariables($$)
 	}
 }
 
-sub DeclareArrayVariables($$;$)
+sub DeclareArrayVariables($$)
 {
-	my ($self,$e,$pull) = @_;
+	my ($self,$e) = @_;
 
 	foreach my $l (@{$e->{LEVELS}}) {
-		next if ($l->{TYPE} ne "ARRAY");
-		if (defined($pull)) {
-			$self->pidl("uint32_t size_$e->{NAME}_$l->{LEVEL_INDEX} = 0;");
-			if ($l->{IS_VARYING}) {
-				$self->pidl("uint32_t length_$e->{NAME}_$l->{LEVEL_INDEX} = 0;");
-			}
-		}
 		next if has_fast_array($e,$l);
 		next if is_charset_array($e,$l);
-		$self->pidl("uint32_t cntr_$e->{NAME}_$l->{LEVEL_INDEX};");
+		if ($l->{TYPE} eq "ARRAY") {
+			$self->pidl("uint32_t cntr_$e->{NAME}_$l->{LEVEL_INDEX};");
+		}
 	}
 }
 
@@ -1684,14 +1596,15 @@ sub DeclareArrayVariablesNoZero($$$)
 	my ($self,$e,$env) = @_;
 
 	foreach my $l (@{$e->{LEVELS}}) {
-		next if ($l->{TYPE} ne "ARRAY");
 		next if has_fast_array($e,$l);
 		next if is_charset_array($e,$l);
-		my $length = ParseExpr($l->{LENGTH_IS}, $env, $e->{ORIGINAL});
-		if ($length eq "0") {
+		if ($l->{TYPE} eq "ARRAY") {
+		    my $length = ParseExpr($l->{LENGTH_IS}, $env, $e->{ORIGINAL});
+		    if ($length eq "0") {
 			warning($e->{ORIGINAL}, "pointless array cntr: 'cntr_$e->{NAME}_$l->{LEVEL_INDEX}': length=$length");
-		} else {
+		    } else {
 			$self->pidl("uint32_t cntr_$e->{NAME}_$l->{LEVEL_INDEX};");
+		    }
 		}
 	}
 }
@@ -1707,7 +1620,7 @@ sub DeclareMemCtxVariables($$)
 		}
 
 		if (defined($mem_flags)) {
-			$self->pidl("TALLOC_CTX *_mem_save_$e->{NAME}_$l->{LEVEL_INDEX} = NULL;");
+			$self->pidl("TALLOC_CTX *_mem_save_$e->{NAME}_$l->{LEVEL_INDEX};");
 		}
 	}
 }
@@ -1762,7 +1675,7 @@ sub ParseStructPull($$$$)
 	# declare any internal pointers we need
 	foreach my $e (@{$struct->{ELEMENTS}}) {
 		$self->DeclarePtrVariables($e);
-		$self->DeclareArrayVariables($e, "pull");
+		$self->DeclareArrayVariables($e);
 		$self->DeclareMemCtxVariables($e);
 	}
 
@@ -1875,9 +1788,7 @@ sub ParseUnionPushPrimitives($$$$)
 				$self->pidl("NDR_CHECK(ndr_push_setup_relative_base_offset1($ndr, $varname, $ndr->offset));");
 			}
 			$self->DeclareArrayVariables($el);
-			my $el_env = {$el->{NAME} => "$varname->$el->{NAME}"};
-			$self->CheckRefPtrs($el, $ndr, $el_env);
-			$self->ParseElementPush($el, $ndr, $el_env, 1, 0);
+			$self->ParseElementPush($el, $ndr, {$el->{NAME} => "$varname->$el->{NAME}"}, 1, 0);
 			$self->deindent;
 		}
 		$self->pidl("break; }");
@@ -1942,13 +1853,11 @@ sub ParseUnionPush($$$$)
 	$self->ParseUnionPushPrimitives($e, $ndr, $varname);
 	$self->deindent;
 	$self->pidl("}");
-        if (is_deferred_switch_non_empty($e)) {
-                $self->pidl("if (ndr_flags & NDR_BUFFERS) {");
-                $self->indent;
-                $self->ParseUnionPushDeferred($e, $ndr, $varname);
-                $self->deindent;
-                $self->pidl("}");
-        }
+	$self->pidl("if (ndr_flags & NDR_BUFFERS) {");
+	$self->indent;
+	$self->ParseUnionPushDeferred($e, $ndr, $varname);
+	$self->deindent;
+	$self->pidl("}");
 	$self->end_flags($e, $ndr);
 }
 
@@ -2031,6 +1940,8 @@ sub ParseUnionPullPrimitives($$$$$)
 
 		if ($el->{TYPE} ne "EMPTY") {
 			$self->indent;
+			$self->DeclarePtrVariables($el);
+			$self->DeclareArrayVariables($el);
 			if (defined($e->{PROPERTIES}{relative_base})) {
 				$self->pidl("NDR_CHECK(ndr_pull_align($ndr, $el->{ALIGN}));");
 				# set the current offset as base for relative pointers
@@ -2093,7 +2004,7 @@ sub ParseUnionPull($$$$)
 {
 	my ($self,$e,$ndr,$varname) = @_;
 	my $switch_type = $e->{SWITCH_TYPE};
-        my $needs_deferred_switch = is_deferred_switch_non_empty($e);
+
 	$self->pidl("uint32_t level;");
 	if (defined($switch_type)) {
 		if (Parse::Pidl::Typelist::typeIs($switch_type, "ENUM")) {
@@ -2107,34 +2018,26 @@ sub ParseUnionPull($$$$)
 		next if ($el->{TYPE} eq "EMPTY");
 		next if ($double_cases{"$el->{NAME}"});
 		$self->DeclareMemCtxVariables($el);
-		$self->DeclarePtrVariables($el);
-		$self->DeclareArrayVariables($el, "pull");
 		$double_cases{"$el->{NAME}"} = 1;
 	}
 
 	$self->start_flags($e, $ndr);
 
+	$self->pidl("level = ndr_pull_get_switch_value($ndr, $varname);");
+
 	$self->pidl("NDR_PULL_CHECK_FLAGS(ndr, ndr_flags);");
 	$self->pidl("if (ndr_flags & NDR_SCALARS) {");
 	$self->indent;
-	if (! $needs_deferred_switch) {
-		$self->pidl("/* This token is not used again */");
-		$self->pidl("level = ndr_pull_steal_switch_value($ndr, $varname);");
-	} else {
-		$self->pidl("level = ndr_pull_get_switch_value($ndr, $varname);");
-	}
 	$self->ParseUnionPullPrimitives($e,$ndr,$varname,$switch_type);
 	$self->deindent;
 	$self->pidl("}");
-	if ($needs_deferred_switch) {
-		$self->pidl("if (ndr_flags & NDR_BUFFERS) {");
-		$self->indent;
-		$self->pidl("/* The token is not needed after this. */");
-		$self->pidl("level = ndr_pull_steal_switch_value($ndr, $varname);");
-		$self->ParseUnionPullDeferred($e,$ndr,$varname);
-		$self->deindent;
-		$self->pidl("}");
-	}
+
+	$self->pidl("if (ndr_flags & NDR_BUFFERS) {");
+	$self->indent;
+	$self->ParseUnionPullDeferred($e,$ndr,$varname);
+	$self->deindent;
+	$self->pidl("}");
+
 	$self->add_deferred();
 
 	$self->end_flags($e, $ndr);
@@ -2416,12 +2319,6 @@ sub ParseFunctionPush($$)
 
 	foreach my $e (@{$fn->{ELEMENTS}}) {
 		if (grep(/in/,@{$e->{DIRECTION}})) {
-			$self->CheckRefPtrs($e, $ndr, $env);
-		}
-	}
-
-	foreach my $e (@{$fn->{ELEMENTS}}) {
-		if (grep(/in/,@{$e->{DIRECTION}})) {
 			$self->ParseElementPush($e, $ndr, $env, 1, 1);
 		}
 	}
@@ -2433,14 +2330,6 @@ sub ParseFunctionPush($$)
 	$self->indent;
 
 	$env = GenerateFunctionOutEnv($fn);
-	EnvSubstituteValue($env, $fn);
-
-	foreach my $e (@{$fn->{ELEMENTS}}) {
-		if (grep(/out/,@{$e->{DIRECTION}})) {
-			$self->CheckRefPtrs($e, $ndr, $env);
-		}
-	}
-
 	foreach my $e (@{$fn->{ELEMENTS}}) {
 		if (grep(/out/,@{$e->{DIRECTION}})) {
 			$self->ParseElementPush($e, $ndr, $env, 1, 1);
@@ -2497,7 +2386,7 @@ sub ParseFunctionPull($$)
 	# declare any internal pointers we need
 	foreach my $e (@{$fn->{ELEMENTS}}) { 
 		$self->DeclarePtrVariables($e);
-		$self->DeclareArrayVariables($e, "pull");
+		$self->DeclareArrayVariables($e);
 	}
 
 	my %double_cases = ();

@@ -14,7 +14,7 @@ use strict;
 use Parse::Pidl qw(warning error fatal);
 use Parse::Pidl::Typelist qw(mapTypeName scalar_is_reference);
 use Parse::Pidl::Util qw(ParseExpr has_property is_constant);
-use Parse::Pidl::NDR qw(GetNextLevel ContainsPipe);
+use Parse::Pidl::NDR qw(GetNextLevel);
 use Parse::Pidl::Samba4 qw(ElementStars DeclLong);
 use Parse::Pidl::Samba4::Header qw(GenerateFunctionOutEnv);
 
@@ -24,8 +24,6 @@ $VERSION = '0.01';
 my $res;
 my $res_hdr;
 my $tabs = "";
-sub pidl_reset() { $res=""; $res_hdr="", $tabs=""; }
-sub pidl_return() { my $s = $res; my $h = $res_hdr; pidl_reset(); return ($s, $h) }
 sub indent() { $tabs.="\t"; }
 sub deindent() { $tabs = substr($tabs, 1); }
 sub pidl($) { my ($txt) = @_; $res .= $txt?$tabs.(shift)."\n":"\n"; }
@@ -50,9 +48,9 @@ sub DeclLevel($$)
 	return $res;
 }
 
-sub AllocOutVar($$$$$$$)
+sub AllocOutVar($$$$$)
 {
-	my ($e, $mem_ctx, $name, $env, $check, $cleanup, $return) = @_;
+	my ($e, $mem_ctx, $name, $env, $fail) = @_;
 
 	my $l = $e->{LEVELS}[0];
 
@@ -85,18 +83,15 @@ sub AllocOutVar($$$$$$$)
 		pidl "$name = talloc_zero($mem_ctx, " . DeclLevel($e, 1) . ");";
 	}
 
-	pidl "if (" . $check->($name) . ") {";
-	indent;
-	pidl $cleanup->($name) if defined($cleanup);
-	pidl $return->($name) if defined($return);
-	deindent;
+	pidl "if ($name == NULL) {";
+	$fail->();
 	pidl "}";
 	pidl "";
 }
 
-sub CallWithStruct($$$$$$)
+sub CallWithStruct($$$$)
 {
-	my ($pipes_struct, $mem_ctx, $fn, $check, $cleanup, $return) = @_;
+	my ($pipes_struct, $mem_ctx, $fn, $fail) = @_;
 	my $env = GenerateFunctionOutEnv($fn);
 	my $hasout = 0;
 	foreach (@{$fn->{ELEMENTS}}) {
@@ -105,6 +100,8 @@ sub CallWithStruct($$$$$$)
 
 	pidl "ZERO_STRUCT(r->out);" if ($hasout);
 
+	my $proto = "_$fn->{NAME}(struct pipes_struct *p, struct $fn->{NAME} *r";
+	my $ret = "_$fn->{NAME}($pipes_struct, r";
 	foreach (@{$fn->{ELEMENTS}}) {
 		my @dir = @{$_->{DIRECTION}};
 		if (grep(/in/, @dir) and grep(/out/, @dir)) {
@@ -113,28 +110,25 @@ sub CallWithStruct($$$$$$)
 	}
 
 	foreach (@{$fn->{ELEMENTS}}) {
-		next if ContainsPipe($_, $_->{LEVELS}[0]);
 		my @dir = @{$_->{DIRECTION}};
 		if (grep(/in/, @dir) and grep(/out/, @dir)) {
 			# noop
 		} elsif (grep(/out/, @dir) and not
 				 has_property($_, "represent_as")) {
-			AllocOutVar($_, $mem_ctx, "r->out.$_->{NAME}", $env,
-				    $check, $cleanup, $return);
+			AllocOutVar($_, $mem_ctx, "r->out.$_->{NAME}", $env, $fail);
 		}
 	}
-
-	my $proto = "_$fn->{NAME}(struct pipes_struct *p, struct $fn->{NAME} *r)";
-	my $ret = "_$fn->{NAME}($pipes_struct, r)";
+	$ret .= ")";
+	$proto .= ");";
 
 	if ($fn->{RETURN_TYPE}) {
 		$ret = "r->out.result = $ret";
-		$proto = mapTypeName($fn->{RETURN_TYPE})." $proto";
+		$proto = "$fn->{RETURN_TYPE} $proto";
 	} else {
 		$proto = "void $proto";
 	}
 
-	pidl_hdr "$proto;";
+	pidl_hdr "$proto";
 	pidl "$ret;";
 }
 
@@ -181,23 +175,15 @@ sub ParseFunction($$)
 	pidl "}";
 	pidl "";
 
-	CallWithStruct("p", "r", $fn,
-		sub ($) {
-			my ($name) = @_;
-			return "${name} == NULL";
-		},
-		sub ($) {
-			my ($name) = @_;
-			return "talloc_free(r);";
-		},
-		sub ($) {
-			my ($name) = @_;
-			return "return false;";
+	CallWithStruct("p", "r", $fn, 
+	sub { 
+			pidl "\ttalloc_free(r);";
+			pidl "\treturn false;";
 		}
 	);
 
 	pidl "";
-	pidl "if (p->fault_state) {";
+	pidl "if (p->rng_fault_state) {";
 	pidl "\ttalloc_free(r);";
 	pidl "\t/* Return true here, srv_pipe_hnd.c will take care */";
 	pidl "\treturn true;";
@@ -299,7 +285,8 @@ sub Parse($$$)
 {
 	my($ndr,$header,$ndr_header) = @_;
 
-	pidl_reset();
+	$res = "";
+	$res_hdr = "";
 
 	pidl "/*";
 	pidl " * Unix SMB/CIFS implementation.";
@@ -316,7 +303,7 @@ sub Parse($$$)
 		ParseInterface($_) if ($_->{TYPE} eq "INTERFACE");
 	}
 
-	return pidl_return();
+	return ($res, $res_hdr);
 }
 
 1;

@@ -38,7 +38,7 @@ sub HeaderProperties($$)
 	my($props,$ignores) = @_;
 	my $ret = "";
 
-	foreach my $d (sort(keys %{$props})) {
+	foreach my $d (keys %{$props}) {
 		next if (grep(/^$d$/, @$ignores));
 		if($props->{$d} ne "1") {
 			$ret.= "$d($props->{$d}),";
@@ -142,7 +142,7 @@ sub HeaderEnum($$;$)
 		my $count = 0;
 		my $with_val = 0;
 		my $without_val = 0;
-		pidl " { __do_not_use_enum_$name=0x7FFFFFFF}\n";
+		pidl " { __donnot_use_enum_$name=0x7FFFFFFF}\n";
 		foreach my $e (@{$enum->{ELEMENTS}}) {
 			my $t = "$e";
 			my $name;

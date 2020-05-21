@@ -57,6 +57,9 @@ typedef struct {
 	char *spacestate_hook_open;
 	char *spacestate_hook_close;
 
+	/* Hook script configuration */
+	char *hook_script_path;
+
 	/* Global configuration based state */
 	GKeyFile *keyfile;
 	uint8_t event_handler_cnt;
